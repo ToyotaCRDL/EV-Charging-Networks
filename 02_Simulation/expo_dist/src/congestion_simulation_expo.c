@@ -44,7 +44,7 @@ typedef struct {
   int eval;             // 移動中(0), 目的地にたどり着けた(1), 途中で消滅した(2)
   int soc;              // 充電状態(SoC). 0~10の11段階. 1ホップ移動するごとに1段階減る.
   double soc_limit;     // 充電を開始するSoC
-  int charging_flag;    // 充電中(1), 移動中(0). SoCが10になるまで充電フラグは0にならない.
+  int charging_flag;    // 充電中(1), 待機中(2), 移動中(0). SoCが10になるまで充電フラグは0にならない.
 } agent_t;
 
 typedef struct {
@@ -54,8 +54,7 @@ typedef struct {
   int link; 		// number of links
   int ini_agent_num;    // initial number of agents
   int max_soc;		// SoC
-  double mu;	        // mu for normal dist.
-  double sigma;         // sigma for normal dist.
+  double dist_para;     // Shape para. of the slot dist
   int max_resource;	// B
   int max_service;	// O
   int max_step_num;	// number of steps for a simulation
@@ -76,7 +75,7 @@ int core(info_t info, node_t node[], link_t link[], agent_t agent[], infra_t inf
 int agent_creation_process(int t, int agent_creation_num, int next_agent_id, agent_t agent[], int node_num, node_t node[], int max_resource, int max_soc);
 info_t agent_forwarding_process(int t, info_t info, int next_agent_id, int node_num, node_t node[], int link_num, link_t link[], agent_t agent[], infra_t infra[], int max_resource, int max_soc, int max_service, double gamma);
 void node_updating_process(int node_num, node_t node[], int max_resource);
-void output_result(agent_t agent[], int ini_agent_num, int next_agent_id, node_t node[], int node_num, infra_t infra[], int t, int max_resource, int max_soc, double mu, int max_service, double gamma, char *OUT_DIR);
+void output_result(agent_t agent[], int ini_agent_num, int next_agent_id, node_t node[], int node_num, infra_t infra[], int t, int max_resource, int max_soc, double dist_para, int max_service, double gamma, char *OUT_DIR);
 
 // Random value followed Normal distribution
 double rand_normal(double mu, double sigma) {
@@ -233,12 +232,12 @@ int main(int argc, char *argv[]) {
   double MAX_RESOURCE = atof(argv[4]);		// B
   double GAMMA        = atof(argv[5]);		// velocity on Layer2 (velocity = 1 on Layer1)
   int MAX_SOC         = atoi(argv[6]);		// Maximum SoC
-  double MU           = atof(argv[7]);		// mu for normal dist.
-  double SIGMA        = MU/3.0;
-  int SERVICE         = atoi(argv[8]);		// Maximum service rate
-  int STEP_NUM        = atoi(argv[9]);		// Number of steps for a simulation
-  int INI_AGENT_NUM   = atoi(argv[10]);		// 初期状態におけるエージェントの総数
-  int SEED            = atoi(argv[11]);		// 乱数のシード
+  int DIST_TYPE       = atoi(argv[7]);		// Distribution type of charging slot (norm. = 1, expo. = 2)
+  double DIST_PARA    = atof(argv[8]);		// Shape parameter for the slop distribution
+  int SERVICE         = atoi(argv[9]);		// Maximum service rate
+  int STEP_NUM        = atoi(argv[10]);		// Number of steps for a simulation
+  int INI_AGENT_NUM   = atoi(argv[11]);		// Initial number of agents
+  int SEED            = atoi(argv[12]);		// random seed
   
   /* 配列の確保 etc. */
   node = (node_t *)calloc(10000000, sizeof(node_t));
@@ -264,17 +263,21 @@ int main(int argc, char *argv[]) {
   }
   
   /* ファイルの読み込み ... id(%d),outdeg(%d),indeg(%d),deg(%d) */
-  int id, outdeg, indeg, deg, chg_num;
+  int id, outdeg, indeg, deg;
   int cnt = 0;
+  double sigma, lambda;
   while( fscanf(fp1, "%d,%d,%d,%d\n", &id,&outdeg,&indeg,&deg ) != EOF ){
     node[id].deg = deg;
     node[id].queue = 0;
     node[id].layer = 1;
     node[id].service_num = 0;
-    chg_num = round(rand_normal(MU, SIGMA));
-    node[id].all_charger_num = chg_num;
-//    node[id].all_charger_num = rand_exp(LAMBDA);
-//    node[id].all_charger_num = 10000;
+    if ( DIST_TYPE == 1 ) {
+      sigma = DIST_PARA/3.0;
+      node[id].all_charger_num = round(rand_normal(DIST_PARA, sigma));
+    } else if ( DIST_TYPE == 2 ) {
+      lambda = 1.0/DIST_PARA;
+      node[id].all_charger_num = rand_exp(lambda);
+    }
     node[id].used_charger_num = 0;
     if (cnt >= 1000) {
       printf("###ERROR### ノードファイル(1)エラー\n");
@@ -310,8 +313,7 @@ int main(int argc, char *argv[]) {
   info.node = node_num;
   info.link = link_num;
   info.max_resource = MAX_RESOURCE;
-  info.mu = MU;
-  info.sigma = SIGMA;
+  info.dist_para = DIST_PARA;
   info.max_soc = MAX_SOC;
   info.max_service = SERVICE;
   info.max_step_num = STEP_NUM;
@@ -337,7 +339,7 @@ int core(info_t info, node_t node[], link_t link[], agent_t agent[], infra_t inf
   int link_num      = info.link;
   int max_resource  = info.max_resource;
   int max_soc       = info.max_soc;
-  double mu         = info.mu;
+  double dist_para  = info.dist_para;
   int max_service   = info.max_service;
   int max_step_num  = info.max_step_num;
   double gamma      = info.gamma;
@@ -353,7 +355,7 @@ int core(info_t info, node_t node[], link_t link[], agent_t agent[], infra_t inf
   // Main
   int agent_creation_num = ini_agent_num;
   for (t = 0; t < max_step_num; t++) {
-    printf("%d step ... next agent id %d (success %d, next_creation_num %d (ini_agent_num %d, max_soc %d)) by mu=%1.1f, G=%1.3f, B=%d\n", t, next_agent_id, info.success, agent_creation_num, ini_agent_num, max_soc, mu, gamma, max_resource);
+    printf("%d step ... next agent id %d (success %d, next_creation_num %d (ini_agent_num %d, max_soc %d)) by dist_para=%1.1f, G=%1.3f, B=%d\n", t, next_agent_id, info.success, agent_creation_num, ini_agent_num, max_soc, dist_para, gamma, max_resource);
     
     /*------------------------*/
     /* Agent Creation Process */
@@ -369,7 +371,7 @@ int core(info_t info, node_t node[], link_t link[], agent_t agent[], infra_t inf
     
     // 参入時刻で構造体をソート for Fast In Fast Out ... qsort(配列, 配列数, 型のサイズ, ソートする関数)
     qsort(agent, next_agent_id, sizeof(agent_t), comp);
-
+    
     /*-----------------------*/
     /* Node Updating Process */
     /*-----------------------*/
@@ -377,7 +379,7 @@ int core(info_t info, node_t node[], link_t link[], agent_t agent[], infra_t inf
   }
   
   // Output
-  output_result(agent, ini_agent_num, next_agent_id, node, node_num, infra, t, max_resource, max_soc, mu, max_service, gamma, OUT_DIR);
+  output_result(agent, ini_agent_num, next_agent_id, node, node_num, infra, t, max_resource, max_soc, dist_para, max_service, gamma, OUT_DIR);
   
   time(&time_now);
   tm_now = localtime(&time_now);
@@ -436,17 +438,24 @@ info_t agent_forwarding_process(int t, info_t info, int next_agent_id, int node_
   for (src = 0; src < next_agent_id; src++) {
     if ((agent[src].t_now == t)&&(agent[src].eval == 0)) {
       node_position = agent[src].current;
-      
-      // SoCが0の場合は充電する
-      if (agent[src].soc <= agent[src].soc_limit) {
-	// 充電設備がいっぱいで充電できない場合
-	if (node[node_position].used_charger_num == node[node_position].all_charger_num) {
-	  infra[t].failure += 1;
-	// 充電設備に空きがあって充電できる場合
-	} else {
-	  agent[src].charging_flag = 1;
-	  node[node_position].used_charger_num += 1;
-	  infra[t].new += 1;
+
+      // 充電中でないagentについて
+      if (agent[src].charging_flag != 1) {
+
+	// SoCが閾値以下の場合は充電する
+	if (agent[src].soc <= agent[src].soc_limit) {
+
+	  // 充電設備がいっぱいで充電できない場合
+	  if (node[node_position].used_charger_num == node[node_position].all_charger_num) {
+	    agent[src].charging_flag = 2;
+	    infra[t].failure += 1;
+	    
+	  // 充電設備に空きがあって充電できる場合
+	  } else {
+	    agent[src].charging_flag = 1;
+	    node[node_position].used_charger_num += 1;
+	    infra[t].new += 1;
+	  }
 	}
       }
       
@@ -460,7 +469,12 @@ info_t agent_forwarding_process(int t, info_t info, int next_agent_id, int node_
 	}
 	infra[t].charging += 1;
 	
-      // 移動中の場合は次の移動先を探す
+      // 充電待機中は待機する
+      } else if (agent[src].charging_flag == 2) {
+	agent[src].t_now += 1;
+//      agent[src].soc -= 1;
+	
+      // 移動できる場合は次の移動先を探す
       } else {
 	infra[t].skip += 1;
 	
@@ -546,13 +560,14 @@ void node_updating_process(int node_num, node_t node[], int max_resource) {
   }
 }
 
-void output_result(agent_t agent[], int ini_agent_num, int next_agent_id, node_t node[], int node_num, infra_t infra[], int t, int max_resource, int max_soc, double mu, int max_service, double gamma, char *OUT_DIR) {
+void output_result(agent_t agent[], int ini_agent_num, int next_agent_id, node_t node[], int node_num, infra_t infra[], int t, int max_resource, int max_soc, double dist_para, int max_service, double gamma, char *OUT_DIR) {
+
   int i;
   char filename[10000], filename2[10000], filename3[10000];
   FILE *fp, *fp2, *fp3;
   
   // 出力ファイル ... エージェント情報
-  sprintf(filename, "%s/agent_step_%d_%d_%d_%d_%1.1f_%d_%1.3f.csv", OUT_DIR, t, ini_agent_num, max_resource, max_soc, mu, max_service, gamma);
+  sprintf(filename, "%s/agent_step_%d_%d_%d_%d_%1.1f_%d_%1.3f.csv", OUT_DIR, t, ini_agent_num, max_resource, max_soc, dist_para, max_service, gamma);
   if ((fp = fopen(filename, "w")) == NULL) {
     printf("###ERROR### 出力ファイル（リンク）を開けませんでした\n");
     exit(1);
@@ -563,7 +578,7 @@ void output_result(agent_t agent[], int ini_agent_num, int next_agent_id, node_t
   fclose(fp);
   
   // 出力ファイル ... ノード情報
-  sprintf(filename2, "%s/node_step_%d_%d_%d_%d_%1.1f_%d_%1.3f.csv", OUT_DIR, t, ini_agent_num, max_resource, max_soc, mu, max_service, gamma);
+  sprintf(filename2, "%s/node_step_%d_%d_%d_%d_%1.1f_%d_%1.3f.csv", OUT_DIR, t, ini_agent_num, max_resource, max_soc, dist_para, max_service, gamma);
   if ((fp2 = fopen(filename2, "w")) == NULL) {
     printf("###ERROR### 出力ファイル（ノード）を開けませんでした\n");
     exit(1);
@@ -574,7 +589,7 @@ void output_result(agent_t agent[], int ini_agent_num, int next_agent_id, node_t
   fclose(fp2);
 
   // 出力ファイル ... 充電可否情報報
-  sprintf(filename3, "%s/infra_step_%d_%d_%d_%d_%1.1f_%d_%1.3f.csv", OUT_DIR, t, ini_agent_num, max_resource, max_soc, mu, max_service, gamma);
+  sprintf(filename3, "%s/infra_step_%d_%d_%d_%d_%1.1f_%d_%1.3f.csv", OUT_DIR, t, ini_agent_num, max_resource, max_soc, dist_para, max_service, gamma);
   if ((fp3 = fopen(filename3, "w")) == NULL) {
     printf("###ERROR### 出力ファイル（充電可否）を開けませんでした\n");
     exit(1);
